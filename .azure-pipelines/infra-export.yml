@@ -51,7 +51,7 @@ stages:
     jobs:
       - job: Scan
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         steps:
           - checkout: self
 
@@ -104,7 +104,7 @@ stages:
     jobs:
       - job: Export
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         steps:
           - checkout: self
             persistCredentials: true

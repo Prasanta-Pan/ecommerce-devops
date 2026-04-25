@@ -60,7 +60,7 @@ stages:
     jobs:
       - job: Plan
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         steps:
           - checkout: self
 
@@ -107,7 +107,7 @@ stages:
     jobs:
       - deployment: Apply
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         environment: infrastructure
         strategy:
           runOnce:
@@ -157,7 +157,7 @@ stages:
     jobs:
       - job: Destroy_Plan
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         steps:
           - checkout: self
 
@@ -204,7 +204,7 @@ stages:
     jobs:
       - deployment: Destroy
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         environment: infrastructure-destroy
         strategy:
           runOnce:
@@ -255,7 +255,7 @@ stages:
     jobs:
       - job: Recreate_Plan
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         steps:
           - checkout: self
 
@@ -302,7 +302,7 @@ stages:
     jobs:
       - deployment: Recreate_Apply
         pool:
-          name: Default
+          vmImage: ubuntu-latest
         environment: infrastructure
         strategy:
           runOnce:
