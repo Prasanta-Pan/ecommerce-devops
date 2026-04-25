@@ -46,7 +46,7 @@ stages:
     jobs:
       - job: Build_Test
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         steps:
           - checkout: order_service
 
@@ -75,7 +75,7 @@ stages:
     jobs:
       - job: Docker_Push
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         steps:
           - checkout: order_service
 
@@ -98,7 +98,7 @@ stages:
     jobs:
       - deployment: Deploy
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         environment: development
         strategy:
           runOnce:
@@ -128,7 +128,7 @@ stages:
     jobs:
       - deployment: Deploy
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         environment: uat
         strategy:
           runOnce:
@@ -158,7 +158,7 @@ stages:
     jobs:
       - deployment: Deploy
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         environment: production
         strategy:
           runOnce:

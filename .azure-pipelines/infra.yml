@@ -44,7 +44,7 @@ stages:
     jobs:
       - job: Plan
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         steps:
           - checkout: self
 
@@ -87,7 +87,7 @@ stages:
     jobs:
       - deployment: Apply
         pool:
-          vmImage: 'ubuntu-latest'
+          name: Default
         environment: infrastructure
         strategy:
           runOnce:
