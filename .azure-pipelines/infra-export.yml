@@ -1,0 +1,188 @@
+# Infrastructure Export Pipeline
+# Scans an existing Dev resource group and exports resources as Terraform code.
+#
+# Workflow:
+#   Step 1: Run action=scan  → review published artifact (summary.txt)
+#   Step 2: Run action=commit → export selected resources, commit to feature/export-dev branch
+#   Step 3: Raise a PR, enrich the generated .tf files, merge to main
+#   Step 4: Run infra.yml to deploy to any environment
+#
+# SETUP in Azure DevOps:
+#   - Service connection : ecommerce-azure-connection (Azure Resource Manager)
+#   - Variable group     : ecommerce-global-vars (must include DEV_RESOURCE_GROUP)
+#   - Agent pool         : Default (Linux agent required for aztfexport)
+
+trigger: none
+pr: none
+
+parameters:
+  - name: action
+    displayName: 'Export Action'
+    type: string
+    default: scan
+    values:
+      - scan        # Dry-run: list all resources, publish summary artifact
+      - commit      # Export selected resources, commit to feature branch
+
+  - name: export_exclude
+    displayName: 'Resource types to exclude (comma-separated, commit only)'
+    type: string
+    default: ''
+    # Example: azurerm_storage_account,azurerm_key_vault
+
+variables:
+  - group: ecommerce-global-vars
+  - name: AZTFEXPORT_VERSION
+    value: '0.15.0'
+  - name: EXPORT_DIR
+    value: 'infra/generated'
+  - name: EXPORT_BRANCH
+    value: 'feature/export-dev'
+
+# ─── STAGE 1: Scan ────────────────────────────────────────────────────────────
+# Produces a human-readable summary of every resource in the Dev resource group.
+# Review the published artifact before deciding what to exclude in the commit run.
+
+stages:
+
+  - stage: Export_Scan
+    displayName: 'Scan Dev Resource Group'
+    condition: eq('${{ parameters.action }}', 'scan')
+    jobs:
+      - job: Scan
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: 'List all resources in Dev resource group'
+            inputs:
+              azureSubscription: ecommerce-azure-connection
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "Resource Group : $(DEV_RESOURCE_GROUP)"
+                echo "Scanned at     : $(date -u)"
+                echo ""
+
+                echo "=== All Resources ===" > scan-summary.txt
+                echo "Resource Group : $(DEV_RESOURCE_GROUP)" >> scan-summary.txt
+                echo "Scanned at     : $(date -u)" >> scan-summary.txt
+                echo "" >> scan-summary.txt
+
+                az resource list \
+                  --resource-group "$(DEV_RESOURCE_GROUP)" \
+                  --query "sort_by([].{Name:name, Type:type, Location:location, SKU:sku.name}, &Type)" \
+                  --output table \
+                  >> scan-summary.txt
+
+                echo "" >> scan-summary.txt
+                echo "=== Resource Count by Type ===" >> scan-summary.txt
+                az resource list \
+                  --resource-group "$(DEV_RESOURCE_GROUP)" \
+                  --query "[].type" \
+                  --output tsv \
+                  | sort | uniq -c | sort -rn \
+                  >> scan-summary.txt
+
+                cat scan-summary.txt
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish scan summary artifact'
+            inputs:
+              targetPath: 'scan-summary.txt'
+              artifact: 'export-scan-$(Build.BuildId)'
+
+# ─── STAGE 2: Commit ──────────────────────────────────────────────────────────
+# Runs aztfexport against the Dev resource group, generates .tf files, and
+# commits them to feature/export-dev for PR review and enrichment.
+
+  - stage: Export_Commit
+    displayName: 'Export & Commit to feature/export-dev'
+    condition: eq('${{ parameters.action }}', 'commit')
+    jobs:
+      - job: Export
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+            persistCredentials: true
+
+          - script: |
+              set -e
+              DOWNLOAD_URL="https://github.com/Azure/aztfexport/releases/download/v$(AZTFEXPORT_VERSION)/aztfexport_$(AZTFEXPORT_VERSION)_linux_amd64.zip"
+              curl -sL "$DOWNLOAD_URL" -o aztfexport.zip
+              unzip -o aztfexport.zip aztfexport
+              chmod +x aztfexport
+              sudo mv aztfexport /usr/local/bin/aztfexport
+              aztfexport version
+            displayName: 'Install aztfexport $(AZTFEXPORT_VERSION)'
+
+          - task: AzureCLI@2
+            displayName: 'Run aztfexport'
+            inputs:
+              azureSubscription: ecommerce-azure-connection
+              scriptType: bash
+              addSpnToEnvironment: true
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_CLIENT_SECRET=$servicePrincipalKey
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                mkdir -p "$(EXPORT_DIR)"
+
+                # Build exclude flags from comma-separated parameter
+                EXCLUDE_FLAGS=""
+                if [ -n "${{ parameters.export_exclude }}" ]; then
+                  IFS=',' read -ra TYPES <<< "${{ parameters.export_exclude }}"
+                  for TYPE in "${TYPES[@]}"; do
+                    TRIMMED=$(echo "$TYPE" | xargs)
+                    EXCLUDE_FLAGS="$EXCLUDE_FLAGS --exclude-resource-type $TRIMMED"
+                  done
+                  echo "Excluding resource types: ${{ parameters.export_exclude }}"
+                fi
+
+                aztfexport resource-group \
+                  --non-interactive \
+                  --overwrite \
+                  --module-path "$(EXPORT_DIR)" \
+                  $EXCLUDE_FLAGS \
+                  "$(DEV_RESOURCE_GROUP)"
+
+                echo "Export complete. Files written to $(EXPORT_DIR)/"
+                ls -la "$(EXPORT_DIR)/"
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish generated Terraform files as artifact'
+            inputs:
+              targetPath: '$(EXPORT_DIR)'
+              artifact: 'exported-tf-$(Build.BuildId)'
+
+          - script: |
+              set -e
+              git config user.email "azuredevops@pipeline.local"
+              git config user.name "Azure DevOps Pipeline"
+
+              git checkout -B "$(EXPORT_BRANCH)"
+              git add "$(EXPORT_DIR)/"
+              git diff --cached --stat
+
+              git commit -m "chore(infra): export terraform from dev resource group
+
+              Build     : $(Build.BuildId)
+              Resource  : $(DEV_RESOURCE_GROUP)
+              Excluded  : ${{ parameters.export_exclude }}
+              Generated : $(date -u)
+
+              Review infra/generated/, enrich as needed, then merge to main.
+              [skip ci]"
+
+              git push origin "$(EXPORT_BRANCH)" --force
+              echo ""
+              echo "Committed to branch: $(EXPORT_BRANCH)"
+              echo "Raise a PR to review and merge the generated Terraform files."
+            displayName: 'Commit exported files to $(EXPORT_BRANCH)'

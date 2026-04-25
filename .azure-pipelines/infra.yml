@@ -1,11 +1,18 @@
-# Infrastructure Pipeline — Terraform Plan & Apply
+# Infrastructure Pipeline — Terraform Plan / Apply / Destroy / Recreate
 # Manages: Event Hub, APIM (new resources)
 # References: existing AKS, PostgreSQL, VNet via data sources
 #
+# Workflow per action:
+#   plan     → Plan only (review output)
+#   apply    → Plan → [approve] → Apply
+#   destroy  → Destroy Plan → [approve] → Destroy
+#   recreate → Destroy Plan → [approve] → Destroy → Plan → [approve] → Apply
+#
 # SETUP in Azure DevOps:
-# - Service connection: ecommerce-azure-connection (Azure Resource Manager)
-# - Variable group: ecommerce-global-vars with TF_STATE_RG, TF_STATE_SA
-# - Environment: infrastructure (add approval gate before apply)
+#   - Service connection : ecommerce-azure-connection (Azure Resource Manager)
+#   - Variable group     : ecommerce-global-vars (TF_STATE_RG, TF_STATE_SA)
+#   - Environment        : infrastructure         (approval gate for apply)
+#   - Environment        : infrastructure-destroy (approval gate for destroy)
 
 trigger: none
 pr: none
@@ -19,6 +26,7 @@ parameters:
       - dev
       - uat
       - prod
+
   - name: action
     displayName: 'Terraform Action'
     type: string
@@ -27,6 +35,7 @@ parameters:
       - plan
       - apply
       - destroy
+      - recreate
 
 variables:
   - group: ecommerce-global-vars
@@ -37,10 +46,17 @@ variables:
   - name: TF_VARS_FILE
     value: 'environments/${{ parameters.environment }}.tfvars'
 
+# ─── SHARED STEP TEMPLATES ────────────────────────────────────────────────────
+
 stages:
 
+# ─── STAGE 1: Plan ────────────────────────────────────────────────────────────
+# Runs for: plan, apply, recreate
+# Shows exactly what will be created or changed before any action is taken.
+
   - stage: Terraform_Plan
-    displayName: 'Terraform Init + Plan (${{ parameters.environment }})'
+    displayName: 'Plan (${{ parameters.environment }})'
+    condition: in('${{ parameters.action }}', 'plan', 'apply', 'recreate')
     jobs:
       - job: Plan
         pool:
@@ -75,13 +91,17 @@ stages:
               commandOptions: '-var-file="../$(TF_VARS_FILE)" -out=tfplan'
 
           - task: PublishPipelineArtifact@1
-            displayName: 'Save plan artifact'
+            displayName: 'Publish plan artifact'
             inputs:
               targetPath: '$(TF_DIR)/tfplan'
-              artifact: 'tfplan-${{ parameters.environment }}'
+              artifact: 'tfplan-${{ parameters.environment }}-$(Build.BuildId)'
+
+# ─── STAGE 2: Apply ───────────────────────────────────────────────────────────
+# Runs for: apply
+# Requires approval on the 'infrastructure' environment before executing.
 
   - stage: Terraform_Apply
-    displayName: 'Terraform Apply (${{ parameters.environment }})'
+    displayName: 'Apply (${{ parameters.environment }})'
     dependsOn: Terraform_Plan
     condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'))
     jobs:
@@ -96,12 +116,14 @@ stages:
                 - checkout: self
 
                 - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
                   inputs:
                     terraformVersion: $(TF_VERSION)
 
                 - task: DownloadPipelineArtifact@2
+                  displayName: 'Download plan artifact'
                   inputs:
-                    artifact: 'tfplan-${{ parameters.environment }}'
+                    artifact: 'tfplan-${{ parameters.environment }}-$(Build.BuildId)'
                     targetPath: '$(TF_DIR)'
 
                 - task: TerraformTaskV4@4
@@ -123,4 +145,199 @@ stages:
                     command: apply
                     workingDirectory: $(TF_DIR)
                     environmentServiceNameAzureRM: ecommerce-azure-connection
-                    commandOptions: 'tfplan'
+                    commandOptions: 'tfplan-${{ parameters.environment }}-$(Build.BuildId)'
+
+# ─── STAGE 3: Destroy Plan ────────────────────────────────────────────────────
+# Runs for: destroy, recreate
+# Shows exactly what will be deleted before any destructive action is taken.
+
+  - stage: Terraform_Destroy_Plan
+    displayName: 'Destroy Plan (${{ parameters.environment }})'
+    condition: in('${{ parameters.action }}', 'destroy', 'recreate')
+    jobs:
+      - job: Destroy_Plan
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform $(TF_VERSION)'
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform init'
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(TF_DIR)
+              backendServiceArm: ecommerce-azure-connection
+              backendAzureRmResourceGroupName: $(TF_STATE_RG)
+              backendAzureRmStorageAccountName: $(TF_STATE_SA)
+              backendAzureRmContainerName: tfstate
+              backendAzureRmKey: 'ecommerce-${{ parameters.environment }}.tfstate'
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform plan -destroy'
+            inputs:
+              provider: azurerm
+              command: plan
+              workingDirectory: $(TF_DIR)
+              environmentServiceNameAzureRM: ecommerce-azure-connection
+              commandOptions: '-destroy -var-file="../$(TF_VARS_FILE)" -out=tfdestroyplan'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish destroy plan artifact'
+            inputs:
+              targetPath: '$(TF_DIR)/tfdestroyplan'
+              artifact: 'tfdestroyplan-${{ parameters.environment }}-$(Build.BuildId)'
+
+# ─── STAGE 4: Destroy ─────────────────────────────────────────────────────────
+# Runs for: destroy, recreate
+# Requires approval on the 'infrastructure-destroy' environment before executing.
+
+  - stage: Terraform_Destroy
+    displayName: 'Destroy (${{ parameters.environment }})'
+    dependsOn: Terraform_Destroy_Plan
+    condition: and(succeeded(), in('${{ parameters.action }}', 'destroy', 'recreate'))
+    jobs:
+      - deployment: Destroy
+        pool:
+          name: Default
+        environment: infrastructure-destroy
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download destroy plan artifact'
+                  inputs:
+                    artifact: 'tfdestroyplan-${{ parameters.environment }}-$(Build.BuildId)'
+                    targetPath: '$(TF_DIR)'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform init'
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(TF_DIR)
+                    backendServiceArm: ecommerce-azure-connection
+                    backendAzureRmResourceGroupName: $(TF_STATE_RG)
+                    backendAzureRmStorageAccountName: $(TF_STATE_SA)
+                    backendAzureRmContainerName: tfstate
+                    backendAzureRmKey: 'ecommerce-${{ parameters.environment }}.tfstate'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform destroy'
+                  inputs:
+                    provider: azurerm
+                    command: apply
+                    workingDirectory: $(TF_DIR)
+                    environmentServiceNameAzureRM: ecommerce-azure-connection
+                    commandOptions: 'tfdestroyplan-${{ parameters.environment }}-$(Build.BuildId)'
+
+# ─── STAGE 5: Recreate Plan ───────────────────────────────────────────────────
+# Runs for: recreate only (after destroy completes)
+# Shows exactly what will be recreated so you can confirm before applying.
+
+  - stage: Terraform_Recreate_Plan
+    displayName: 'Recreate Plan (${{ parameters.environment }})'
+    dependsOn: Terraform_Destroy
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'recreate'))
+    jobs:
+      - job: Recreate_Plan
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform $(TF_VERSION)'
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform init'
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(TF_DIR)
+              backendServiceArm: ecommerce-azure-connection
+              backendAzureRmResourceGroupName: $(TF_STATE_RG)
+              backendAzureRmStorageAccountName: $(TF_STATE_SA)
+              backendAzureRmContainerName: tfstate
+              backendAzureRmKey: 'ecommerce-${{ parameters.environment }}.tfstate'
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform plan (recreate)'
+            inputs:
+              provider: azurerm
+              command: plan
+              workingDirectory: $(TF_DIR)
+              environmentServiceNameAzureRM: ecommerce-azure-connection
+              commandOptions: '-var-file="../$(TF_VARS_FILE)" -out=tfrecreateplan'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish recreate plan artifact'
+            inputs:
+              targetPath: '$(TF_DIR)/tfrecreateplan'
+              artifact: 'tfrecreateplan-${{ parameters.environment }}-$(Build.BuildId)'
+
+# ─── STAGE 6: Recreate Apply ──────────────────────────────────────────────────
+# Runs for: recreate only
+# Requires approval on the 'infrastructure' environment before executing.
+
+  - stage: Terraform_Recreate_Apply
+    displayName: 'Recreate Apply (${{ parameters.environment }})'
+    dependsOn: Terraform_Recreate_Plan
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'recreate'))
+    jobs:
+      - deployment: Recreate_Apply
+        pool:
+          name: Default
+        environment: infrastructure
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download recreate plan artifact'
+                  inputs:
+                    artifact: 'tfrecreateplan-${{ parameters.environment }}-$(Build.BuildId)'
+                    targetPath: '$(TF_DIR)'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform init'
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(TF_DIR)
+                    backendServiceArm: ecommerce-azure-connection
+                    backendAzureRmResourceGroupName: $(TF_STATE_RG)
+                    backendAzureRmStorageAccountName: $(TF_STATE_SA)
+                    backendAzureRmContainerName: tfstate
+                    backendAzureRmKey: 'ecommerce-${{ parameters.environment }}.tfstate'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform apply (recreate)'
+                  inputs:
+                    provider: azurerm
+                    command: apply
+                    workingDirectory: $(TF_DIR)
+                    environmentServiceNameAzureRM: ecommerce-azure-connection
+                    commandOptions: 'tfrecreateplan-${{ parameters.environment }}-$(Build.BuildId)'
