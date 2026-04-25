@@ -1,0 +1,126 @@
+# Infrastructure Pipeline — Terraform Plan & Apply
+# Manages: Event Hub, APIM (new resources)
+# References: existing AKS, PostgreSQL, VNet via data sources
+#
+# SETUP in Azure DevOps:
+# - Service connection: ecommerce-azure-connection (Azure Resource Manager)
+# - Variable group: ecommerce-global-vars with TF_STATE_RG, TF_STATE_SA
+# - Environment: infrastructure (add approval gate before apply)
+
+trigger: none
+pr: none
+
+parameters:
+  - name: environment
+    displayName: 'Target Environment'
+    type: string
+    default: dev
+    values:
+      - dev
+      - uat
+      - prod
+  - name: action
+    displayName: 'Terraform Action'
+    type: string
+    default: plan
+    values:
+      - plan
+      - apply
+      - destroy
+
+variables:
+  - group: ecommerce-global-vars
+  - name: TF_DIR
+    value: 'infra'
+  - name: TF_VERSION
+    value: '1.6.6'
+  - name: TF_VARS_FILE
+    value: 'environments/${{ parameters.environment }}.tfvars'
+
+stages:
+
+  - stage: Terraform_Plan
+    displayName: 'Terraform Init + Plan (${{ parameters.environment }})'
+    jobs:
+      - job: Plan
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform $(TF_VERSION)'
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform init'
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(TF_DIR)
+              backendServiceArm: ecommerce-azure-connection
+              backendAzureRmResourceGroupName: $(TF_STATE_RG)
+              backendAzureRmStorageAccountName: $(TF_STATE_SA)
+              backendAzureRmContainerName: tfstate
+              backendAzureRmKey: 'ecommerce-${{ parameters.environment }}.tfstate'
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform plan'
+            inputs:
+              provider: azurerm
+              command: plan
+              workingDirectory: $(TF_DIR)
+              environmentServiceNameAzureRM: ecommerce-azure-connection
+              commandOptions: '-var-file="../$(TF_VARS_FILE)" -out=tfplan'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Save plan artifact'
+            inputs:
+              targetPath: '$(TF_DIR)/tfplan'
+              artifact: 'tfplan-${{ parameters.environment }}'
+
+  - stage: Terraform_Apply
+    displayName: 'Terraform Apply (${{ parameters.environment }})'
+    dependsOn: Terraform_Plan
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'))
+    jobs:
+      - deployment: Apply
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: infrastructure
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'tfplan-${{ parameters.environment }}'
+                    targetPath: '$(TF_DIR)'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform init'
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(TF_DIR)
+                    backendServiceArm: ecommerce-azure-connection
+                    backendAzureRmResourceGroupName: $(TF_STATE_RG)
+                    backendAzureRmStorageAccountName: $(TF_STATE_SA)
+                    backendAzureRmContainerName: tfstate
+                    backendAzureRmKey: 'ecommerce-${{ parameters.environment }}.tfstate'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform apply'
+                  inputs:
+                    provider: azurerm
+                    command: apply
+                    workingDirectory: $(TF_DIR)
+                    environmentServiceNameAzureRM: ecommerce-azure-connection
+                    commandOptions: 'tfplan'

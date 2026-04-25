@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: ecommerce
+  labels:
+    app: product-service
+    version: "1.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: product-service
+        version: "1.0"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: product-service
+          image: $(ACR_REGISTRY)/product-service:$(IMAGE_TAG)
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # From ConfigMap
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: product-service-config
+                  key: DB_HOST
+            - name: ASPNETCORE_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: product-service-config
+                  key: ASPNETCORE_ENVIRONMENT
+            - name: ASPNETCORE_URLS
+              value: "http://+:8080"
+            # From Secret
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: product-service-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: product-service-secret
+                  key: DB_PASSWORD
+            - name: AzureAd__TenantId
+              valueFrom:
+                secretKeyRef:
+                  name: product-service-secret
+                  key: AZURE_TENANT_ID
+            - name: AzureAd__ClientId
+              valueFrom:
+                secretKeyRef:
+                  name: product-service-secret
+                  key: AZURE_CLIENT_ID
+            - name: AzureAd__Audience
+              valueFrom:
+                secretKeyRef:
+                  name: product-service-secret
+                  key: AZURE_CLIENT_ID
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: false
+      securityContext:
+        fsGroup: 1000

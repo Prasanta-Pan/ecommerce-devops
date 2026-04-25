@@ -1,0 +1,194 @@
+# Product Service — Build & Deploy Pipeline
+# Pulls code from: github.com/Prasanta-Pan/product-service
+# Deploys to: AKS (Dev auto / UAT manual / Prod manual with approval)
+#
+# SETUP in Azure DevOps:
+# - Service connections: github-connection, acr-connection, aks-connection
+# - Variable groups: env-dev-vars, env-uat-vars, env-prod-vars
+# - Environments: development, uat, production (add approval gates on uat + production)
+
+trigger: none
+pr: none
+
+parameters:
+  - name: environment
+    displayName: 'Target Environment'
+    type: string
+    default: dev
+    values:
+      - dev
+      - uat
+      - prod
+
+resources:
+  repositories:
+    - repository: product_service
+      type: github
+      name: Prasanta-Pan/product-service
+      endpoint: github-connection
+
+variables:
+  - name: IMAGE_NAME
+    value: product-service
+  - name: DOTNET_VERSION
+    value: '8.0.x'
+  - ${{ if eq(parameters.environment, 'dev') }}:
+    - group: env-dev-vars
+  - ${{ if eq(parameters.environment, 'uat') }}:
+    - group: env-uat-vars
+  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: env-prod-vars
+
+stages:
+
+  - stage: CI
+    displayName: 'Build & Test'
+    jobs:
+      - job: Build_Test
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: product_service
+
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(DOTNET_VERSION)
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Restore'
+            inputs:
+              command: restore
+              projects: '**/*.csproj'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Build'
+            inputs:
+              command: build
+              projects: '**/*.sln'
+              arguments: '--configuration Release --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Test'
+            inputs:
+              command: test
+              projects: '**/ProductService.Tests/*.csproj'
+              arguments: '--configuration Release --collect:"XPlat Code Coverage"'
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: '**/*.trx'
+
+  - stage: Docker
+    displayName: 'Build & Push Image'
+    dependsOn: CI
+    condition: succeeded()
+    jobs:
+      - job: Docker_Push
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: product_service
+
+          - task: Docker@2
+            displayName: 'Build & Push to ACR'
+            inputs:
+              command: buildAndPush
+              repository: $(IMAGE_NAME)
+              dockerfile: '$(System.DefaultWorkingDirectory)/docker/product-service/Dockerfile'
+              buildContext: '$(System.DefaultWorkingDirectory)'
+              containerRegistry: acr-connection
+              tags: |
+                $(Build.BuildId)
+                ${{ parameters.environment }}-latest
+
+  - stage: Deploy_Dev
+    displayName: 'Deploy → Dev'
+    dependsOn: Docker
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'dev'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: development
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: KubernetesManifest@1
+                  displayName: 'Deploy to AKS Dev'
+                  inputs:
+                    action: deploy
+                    connectionType: azureResourceManager
+                    azureSubscriptionConnection: aks-connection
+                    azureResourceGroup: $(AKS_RESOURCE_GROUP)
+                    kubernetesCluster: $(AKS_CLUSTER_NAME)
+                    namespace: $(K8S_NAMESPACE)
+                    manifests: |
+                      k8s/product-service/deployment.yaml
+                      k8s/product-service/service.yaml
+                      k8s/product-service/configmap.yaml
+                      k8s/product-service/hpa.yaml
+                    containers: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(Build.BuildId)'
+
+  - stage: Deploy_UAT
+    displayName: 'Deploy → UAT'
+    dependsOn: Docker
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'uat'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: uat
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: KubernetesManifest@1
+                  displayName: 'Deploy to AKS UAT'
+                  inputs:
+                    action: deploy
+                    connectionType: azureResourceManager
+                    azureSubscriptionConnection: aks-connection
+                    azureResourceGroup: $(AKS_RESOURCE_GROUP)
+                    kubernetesCluster: $(AKS_CLUSTER_NAME)
+                    namespace: $(K8S_NAMESPACE)
+                    manifests: |
+                      k8s/product-service/deployment.yaml
+                      k8s/product-service/service.yaml
+                      k8s/product-service/configmap.yaml
+                      k8s/product-service/hpa.yaml
+                    containers: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(Build.BuildId)'
+
+  - stage: Deploy_Prod
+    displayName: 'Deploy → Prod'
+    dependsOn: Docker
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'prod'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: KubernetesManifest@1
+                  displayName: 'Deploy to AKS Prod'
+                  inputs:
+                    action: deploy
+                    connectionType: azureResourceManager
+                    azureSubscriptionConnection: aks-connection
+                    azureResourceGroup: $(AKS_RESOURCE_GROUP)
+                    kubernetesCluster: $(AKS_CLUSTER_NAME)
+                    namespace: $(K8S_NAMESPACE)
+                    manifests: |
+                      k8s/product-service/deployment.yaml
+                      k8s/product-service/service.yaml
+                      k8s/product-service/configmap.yaml
+                      k8s/product-service/hpa.yaml
+                    containers: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(Build.BuildId)'

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: ecommerce
+data:
+  DB_HOST: "postgres-service"
+  DB_PORT: "5432"
+  DB_NAME: "ecommerce"
+  AZURE_EVENTHUB_NAME: "order-events"
+  AZURE_EVENTHUB_CONSUMER_GROUP: "$Default"
+  ENRICHMENT_API_URL: "https://api.enrichment.internal/v1"
+  PAYMENT_GATEWAY_URL: "https://pay.gateway.internal/v1"
+  PAYMENT_RETURN_URL: "https://shop.ecommerce.com/payment/callback"

@@ -1,0 +1,11 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+*.tfvars
+!*.tfvars.example
+!environments/
+
+# Azure DevOps
+.azure/

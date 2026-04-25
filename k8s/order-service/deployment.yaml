@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: ecommerce
+  labels:
+    app: order-service
+    version: "1.0.0"
+    component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: order-service
+        version: "1.0.0"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: order-service
+          image: ${ACR_NAME}.azurecr.io/order-service:${IMAGE_TAG}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            # Database
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-secrets
+                  key: DB_PASSWORD
+            # Azure AD
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-secrets
+                  key: AZURE_TENANT_ID
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-secrets
+                  key: AZURE_CLIENT_ID
+            # Azure Service Bus
+            - name: AZURE_SB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-secrets
+                  key: AZURE_SB_CONNECTION_STRING
+            - name: AZURE_SB_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: AZURE_SB_TOPIC
+            # External services
+            - name: ENRICHMENT_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: ENRICHMENT_API_URL
+            - name: PAYMENT_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: PAYMENT_GATEWAY_URL
+            - name: PAYMENT_RETURN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: PAYMENT_RETURN_URL
+            # JVM
+            - name: JAVA_OPTS
+              value: "-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 12
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - order-service
+                topologyKey: kubernetes.io/hostname

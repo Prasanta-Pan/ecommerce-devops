@@ -1,0 +1,186 @@
+# Invoice Service — Build & Deploy Pipeline
+# Pulls code from: github.com/Prasanta-Pan/invoice-service
+# Deploys to: AKS via Helm (Airflow chart) — Dev auto / UAT manual / Prod manual with approval
+#
+# SETUP in Azure DevOps:
+# - Service connections: github-connection, acr-connection, aks-connection
+# - Variable groups: env-dev-vars, env-uat-vars, env-prod-vars
+# - Environments: development, uat, production (add approval gates on uat + production)
+
+trigger: none
+pr: none
+
+parameters:
+  - name: environment
+    displayName: 'Target Environment'
+    type: string
+    default: dev
+    values:
+      - dev
+      - uat
+      - prod
+
+resources:
+  repositories:
+    - repository: invoice_service
+      type: github
+      name: Prasanta-Pan/invoice-service
+      endpoint: github-connection
+
+variables:
+  - name: IMAGE_NAME
+    value: invoice-service
+  - ${{ if eq(parameters.environment, 'dev') }}:
+    - group: env-dev-vars
+  - ${{ if eq(parameters.environment, 'uat') }}:
+    - group: env-uat-vars
+  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: env-prod-vars
+
+stages:
+
+  - stage: CI
+    displayName: 'Build & Test'
+    jobs:
+      - job: Build_Test
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: invoice_service
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.11'
+            inputs:
+              versionSpec: '3.11'
+
+          - script: |
+              pip install -r requirements.txt
+            displayName: 'Install dependencies'
+
+          - script: |
+              pytest tests/ --junitxml=test-results.xml
+            displayName: 'Run tests'
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: 'test-results.xml'
+
+  - stage: Docker
+    displayName: 'Build & Push Image'
+    dependsOn: CI
+    condition: succeeded()
+    jobs:
+      - job: Docker_Push
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: invoice_service
+
+          - task: Docker@2
+            displayName: 'Build & Push to ACR'
+            inputs:
+              command: buildAndPush
+              repository: $(IMAGE_NAME)
+              dockerfile: '$(System.DefaultWorkingDirectory)/docker/invoice-service/Dockerfile'
+              buildContext: '$(System.DefaultWorkingDirectory)'
+              containerRegistry: acr-connection
+              tags: |
+                $(Build.BuildId)
+                ${{ parameters.environment }}-latest
+
+  - stage: Deploy_Dev
+    displayName: 'Deploy → Dev'
+    dependsOn: Docker
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'dev'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: development
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: HelmDeploy@0
+                  displayName: 'Helm upgrade — Airflow (Dev)'
+                  inputs:
+                    connectionType: Azure Resource Manager
+                    azureSubscription: aks-connection
+                    azureResourceGroup: $(AKS_RESOURCE_GROUP)
+                    kubernetesCluster: $(AKS_CLUSTER_NAME)
+                    namespace: airflow
+                    command: upgrade
+                    chartType: Name
+                    chartName: apache-airflow/airflow
+                    releaseName: airflow
+                    valueFile: 'k8s/invoice-service/airflow-values.yaml'
+                    overrideValues: 'defaultAirflowRepository=$(ACR_NAME).azurecr.io/$(IMAGE_NAME),defaultAirflowTag=$(Build.BuildId)'
+                    install: true
+                    waitForExecution: true
+
+  - stage: Deploy_UAT
+    displayName: 'Deploy → UAT'
+    dependsOn: Docker
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'uat'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: uat
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: HelmDeploy@0
+                  displayName: 'Helm upgrade — Airflow (UAT)'
+                  inputs:
+                    connectionType: Azure Resource Manager
+                    azureSubscription: aks-connection
+                    azureResourceGroup: $(AKS_RESOURCE_GROUP)
+                    kubernetesCluster: $(AKS_CLUSTER_NAME)
+                    namespace: airflow
+                    command: upgrade
+                    chartType: Name
+                    chartName: apache-airflow/airflow
+                    releaseName: airflow
+                    valueFile: 'k8s/invoice-service/airflow-values.yaml'
+                    overrideValues: 'defaultAirflowRepository=$(ACR_NAME).azurecr.io/$(IMAGE_NAME),defaultAirflowTag=$(Build.BuildId)'
+                    install: true
+                    waitForExecution: true
+
+  - stage: Deploy_Prod
+    displayName: 'Deploy → Prod'
+    dependsOn: Docker
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'prod'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: HelmDeploy@0
+                  displayName: 'Helm upgrade — Airflow (Prod)'
+                  inputs:
+                    connectionType: Azure Resource Manager
+                    azureSubscription: aks-connection
+                    azureResourceGroup: $(AKS_RESOURCE_GROUP)
+                    kubernetesCluster: $(AKS_CLUSTER_NAME)
+                    namespace: airflow
+                    command: upgrade
+                    chartType: Name
+                    chartName: apache-airflow/airflow
+                    releaseName: airflow
+                    valueFile: 'k8s/invoice-service/airflow-values.yaml'
+                    overrideValues: 'defaultAirflowRepository=$(ACR_NAME).azurecr.io/$(IMAGE_NAME),defaultAirflowTag=$(Build.BuildId)'
+                    install: true
+                    waitForExecution: true

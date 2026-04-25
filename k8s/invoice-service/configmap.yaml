@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: invoice-service-config
+  namespace: airflow
+  labels:
+    app: invoice-service
+    component: airflow
+data:
+  # ----- Database (non-secret) -----
+  DB_HOST: "postgres.default.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "ecommerce"
+  DB_USER: "postgres"
+  DB_SCHEMA: "ecommerce"
+  DB_CONNECT_TIMEOUT: "10"
+
+  # ----- Azure Event Hub (non-secret) -----
+  AZURE_EVENTHUB_NAME: "order-events"
+  AZURE_EVENTHUB_CONSUMER_GROUP: "invoice-processor"
+  EVENTHUB_ENABLED: "true"
+
+  # ----- Email (non-secret) -----
+  EMAIL_PROVIDER: "smtp"
+  SMTP_HOST: "smtp.gmail.com"
+  SMTP_PORT: "587"
+  FROM_EMAIL: "noreply@ecommerce.com"
+  FROM_NAME: "E-Commerce Platform"
+
+  # ----- Application -----
+  COMPANY_NAME: "E-Commerce Platform"
+  SUPPORT_EMAIL: "support@ecommerce.com"
+  MAX_RETRIES: "3"
+  RETRY_BASE_DELAY: "1.0"
+  TMP_DIR: "/tmp"
+
+  # ----- Airflow -----
+  AIRFLOW__CORE__EXECUTOR: "KubernetesExecutor"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  PYTHONPATH: "/opt/airflow"
+---
+# Reminder: create a matching Secret for sensitive values:
+#
+#   kubectl create secret generic invoice-service-secrets \
+#     --namespace airflow \
+#     --from-literal=DB_PASSWORD='...' \
+#     --from-literal=AZURE_EVENTHUB_CONNECTION_STRING='...' \
+#     --from-literal=SMTP_USER='...' \
+#     --from-literal=SMTP_PASSWORD='...' \
+#     --from-literal=SENDGRID_API_KEY='...' \
+#     --from-literal=AIRFLOW__CORE__FERNET_KEY='...' \
+#     --from-literal=AIRFLOW__WEBSERVER__SECRET_KEY='...'

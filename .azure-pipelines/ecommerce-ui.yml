@@ -1,0 +1,158 @@
+# E-Commerce UI — Build & Deploy Pipeline
+# Pulls code from: github.com/Prasanta-Pan/ecommerce-ui
+# Deploys to: Azure Static Web Apps (Dev auto / UAT manual / Prod manual with approval)
+#
+# SETUP in Azure DevOps:
+# - Service connections: github-connection, azure-static-web-apps-connection
+# - Variable groups: env-dev-vars, env-uat-vars, env-prod-vars
+#   Each group must include: VITE_AZURE_CLIENT_ID, VITE_AZURE_TENANT_ID,
+#   VITE_PRODUCT_API_URL, VITE_ORDER_API_URL, AZURE_STATIC_WEB_APPS_API_TOKEN
+# - Environments: development, uat, production (add approval gates on uat + production)
+
+trigger: none
+pr: none
+
+parameters:
+  - name: environment
+    displayName: 'Target Environment'
+    type: string
+    default: dev
+    values:
+      - dev
+      - uat
+      - prod
+
+resources:
+  repositories:
+    - repository: ecommerce_ui
+      type: github
+      name: Prasanta-Pan/ecommerce-ui
+      endpoint: github-connection
+
+variables:
+  - ${{ if eq(parameters.environment, 'dev') }}:
+    - group: env-dev-vars
+  - ${{ if eq(parameters.environment, 'uat') }}:
+    - group: env-uat-vars
+  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: env-prod-vars
+
+stages:
+
+  - stage: CI
+    displayName: 'Build & Test'
+    jobs:
+      - job: Build_Test
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: ecommerce_ui
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js'
+            inputs:
+              versionSpec: '20.x'
+
+          - script: npm ci
+            displayName: 'Install dependencies'
+
+          - script: npm run test -- --run
+            displayName: 'Run tests'
+
+          - script: npm run build
+            displayName: 'Build'
+            env:
+              VITE_AZURE_CLIENT_ID: $(VITE_AZURE_CLIENT_ID)
+              VITE_AZURE_TENANT_ID: $(VITE_AZURE_TENANT_ID)
+              VITE_PRODUCT_API_URL: $(VITE_PRODUCT_API_URL)
+              VITE_ORDER_API_URL: $(VITE_ORDER_API_URL)
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish build artifact'
+            inputs:
+              targetPath: 'dist'
+              artifact: 'ui-dist'
+
+  - stage: Deploy_Dev
+    displayName: 'Deploy → Dev'
+    dependsOn: CI
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'dev'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: development
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: ecommerce_ui
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'ui-dist'
+                    targetPath: 'dist'
+
+                - task: AzureStaticWebApp@0
+                  displayName: 'Deploy to Azure Static Web Apps (Dev)'
+                  inputs:
+                    app_location: '/'
+                    output_location: 'dist'
+                    azure_static_web_apps_api_token: $(AZURE_STATIC_WEB_APPS_API_TOKEN)
+                    skip_app_build: true
+
+  - stage: Deploy_UAT
+    displayName: 'Deploy → UAT'
+    dependsOn: CI
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'uat'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: uat
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: ecommerce_ui
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'ui-dist'
+                    targetPath: 'dist'
+
+                - task: AzureStaticWebApp@0
+                  displayName: 'Deploy to Azure Static Web Apps (UAT)'
+                  inputs:
+                    app_location: '/'
+                    output_location: 'dist'
+                    azure_static_web_apps_api_token: $(AZURE_STATIC_WEB_APPS_API_TOKEN)
+                    skip_app_build: true
+
+  - stage: Deploy_Prod
+    displayName: 'Deploy → Prod'
+    dependsOn: CI
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'prod'))
+    jobs:
+      - deployment: Deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: ecommerce_ui
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'ui-dist'
+                    targetPath: 'dist'
+
+                - task: AzureStaticWebApp@0
+                  displayName: 'Deploy to Azure Static Web Apps (Prod)'
+                  inputs:
+                    app_location: '/'
+                    output_location: 'dist'
+                    azure_static_web_apps_api_token: $(AZURE_STATIC_WEB_APPS_API_TOKEN)
+                    skip_app_build: true

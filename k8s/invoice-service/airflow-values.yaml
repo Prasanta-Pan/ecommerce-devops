@@ -1,0 +1,164 @@
+# ============================================================
+# Helm values override for the official Apache Airflow chart
+# Repository: https://airflow.apache.org/docs/helm-chart/
+#
+# Install with:
+#   helm repo add apache-airflow https://airflow.apache.org
+#   helm upgrade --install airflow apache-airflow/airflow \
+#     -n airflow --create-namespace \
+#     -f k8s/airflow-values.yaml
+# ============================================================
+
+# --- Airflow version ---
+airflowVersion: "2.8.1"
+defaultAirflowTag: "2.8.1-python3.11"
+
+# --- Executor ---
+executor: KubernetesExecutor
+
+# --- DAG source: git-sync sidecar ---
+dags:
+  gitSync:
+    enabled: true
+    repo: https://github.com/your-org/invoice-service.git
+    branch: main
+    rev: HEAD
+    subPath: dags
+    # Use a Kubernetes Secret for private repos:
+    # credentialsSecret: git-credentials
+    wait: 60
+    containerName: git-sync
+    uid: 65533
+
+# --- Webserver ---
+webserver:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+  service:
+    type: ClusterIP
+    port: 8080
+
+# --- Scheduler ---
+scheduler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+
+# --- Workers (KubernetesPodOperator / KubernetesExecutor pods) ---
+workers:
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
+# --- External PostgreSQL (shared with ecommerce schema) ---
+postgresql:
+  enabled: false   # use external DB
+
+data:
+  metadataConnection:
+    user: airflow
+    pass: airflow
+    protocol: postgresql
+    host: postgres.default.svc.cluster.local
+    port: 5432
+    db: airflow
+    sslmode: disable
+
+# --- Extra environment variables (non-secret) ---
+# Secrets should be injected via Kubernetes Secrets / ExternalSecrets
+env:
+  - name: PYTHONPATH
+    value: "/opt/airflow"
+  - name: AIRFLOW__CORE__LOAD_EXAMPLES
+    value: "false"
+  - name: SERVICE_BUS_ENABLED
+    value: "true"
+  - name: EMAIL_PROVIDER
+    value: "smtp"
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: invoice-service-config
+        key: DB_HOST
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: invoice-service-config
+        key: DB_NAME
+  - name: DB_SCHEMA
+    valueFrom:
+      configMapKeyRef:
+        name: invoice-service-config
+        key: DB_SCHEMA
+  - name: AZURE_SB_TOPIC_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: invoice-service-config
+        key: AZURE_SB_TOPIC_NAME
+  - name: AZURE_SB_SUBSCRIPTION_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: invoice-service-config
+        key: AZURE_SB_SUBSCRIPTION_NAME
+  # Sensitive values from a Kubernetes Secret:
+  - name: DB_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: invoice-service-secrets
+        key: DB_PASSWORD
+  - name: AZURE_SB_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: invoice-service-secrets
+        key: AZURE_SB_CONNECTION_STRING
+  - name: SMTP_USER
+    valueFrom:
+      secretKeyRef:
+        name: invoice-service-secrets
+        key: SMTP_USER
+  - name: SMTP_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: invoice-service-secrets
+        key: SMTP_PASSWORD
+
+# --- Extra volume mounts (e.g., for src/ package) ---
+extraVolumes:
+  - name: src-package
+    configMap:
+      name: invoice-service-src
+
+extraVolumeMounts:
+  - name: src-package
+    mountPath: /opt/airflow/src
+    readOnly: true
+
+# --- Liveness / readiness probes ---
+webserverConfig: ""
+
+# --- Ingress (optional, adjust host / TLS as needed) ---
+ingress:
+  web:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: nginx
+    hosts:
+      - name: airflow.ecommerce.internal
+        tls:
+          enabled: false
+    path: "/"
